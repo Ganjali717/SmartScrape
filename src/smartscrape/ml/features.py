@@ -56,28 +56,28 @@ def fl_nodes_and_feats_from_url(
     return nodes, X
 
 
-def fl_nodes_and_feats_from_html(
-    html: str, viewport=(1366, 768)
-) -> Tuple[List[FLNode], np.ndarray]:
-    nodes = render_from_html(html, viewport)
-    X = (
-        np.vstack([fl_node_features(n, *viewport) for n in nodes])
-        if nodes
-        else np.zeros((0, 10))
-    )
-    return nodes, X
+# def fl_nodes_and_feats_from_html(
+#     html: str, viewport=(1366, 768)
+# ) -> Tuple[List[FLNode], np.ndarray]:
+#     nodes = render_from_html(html, viewport)
+#     X = (
+#         np.vstack([fl_node_features(n, *viewport) for n in nodes])
+#         if nodes
+#         else np.zeros((0, 10))
+#     )
+#     return nodes, X
 
 
-def fl_nodes_and_feats_from_file(
-    path: str, viewport=(1366, 768)
-) -> Tuple[List[FLNode], np.ndarray]:
-    nodes = render_with_fitlayout(path, viewport)
-    X = (
-        np.vstack([fl_node_features(n, *viewport) for n in nodes])
-        if nodes
-        else np.zeros((0, 10))
-    )
-    return nodes, X
+# def fl_nodes_and_feats_from_file(
+#     path: str, viewport=(1366, 768)
+# ) -> Tuple[List[FLNode], np.ndarray]:
+#     nodes = render_with_fitlayout(path, viewport)
+#     X = (
+#         np.vstack([fl_node_features(n, *viewport) for n in nodes])
+#         if nodes
+#         else np.zeros((0, 10))
+#     )
+#     return nodes, X
 
 
 def _walk_with_depth(soup: BeautifulSoup):

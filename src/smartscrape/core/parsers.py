@@ -46,28 +46,17 @@ def save_labels(labels: Dict[str, Dict[str, str]]) -> None:
 
 
 # ---------- parsing ----------
-def parse_product_newV6(
-    html: Optional[str] = None, url: Optional[str] = None
+def parse_product_new(
+    url: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Unified product parser with JSON-LD → ML (FitLayout) → heuristics fallbacks."""
-    src_html = html
     jd: Dict[str, Any] = {}
 
     # 1) Try JSON-LD (prefer URL if provided)
-    if url:
-        try:
-            src_html = fetch_html(url, timeout=30)
-        except Exception:
-            src_html = ""
-        try:
-            jd = jsonld_product_from_url(url, timeout=30) or {}
-        except Exception:
-            jd = {}
-    else:
-        try:
-            jd = jsonld_product_from_html(src_html or "") or {}
-        except Exception:
-            jd = {}
+    try:
+        jd = jsonld_product_from_url(url, timeout=30) or {}
+    except Exception:
+        jd = {}
 
     if jd:
 
@@ -94,14 +83,12 @@ def parse_product_newV6(
     title, it = pick_by_model_fl(
         "product",
         "title",
-        html=html,
         url=url,
         fallback_selector="h1,.heading",
     )
     price, ip = pick_by_model_fl(
         "product",
         "price",
-        html=html,
         url=url,
         fallback_selector=".price,[itemprop='price']",
         postproc=lambda s: (
@@ -112,7 +99,7 @@ def parse_product_newV6(
     )
 
     # 3) Heuristic DOM for sku/availability from page text
-    page_text = src_html or html or ""
+    page_text = ""
     sku = None
     avail = None
     m = None
@@ -228,17 +215,13 @@ def pick_by_model_fl(
     domain: str,
     field: str,
     *,
-    html: Optional[str] = None,
     url: Optional[str] = None,
     fallback_selector: str = "",
     postproc=None,
 ):
     try:
         # 1) FitLayout nodes & features
-        if url is not None:
-            nodes, X = fl_nodes_and_feats_from_url(url)
-        else:
-            nodes, X = fl_nodes_and_feats_from_html(html or "")
+        nodes, X = fl_nodes_and_feats_from_url(url)
 
         # 2) ML model inference
         model = load_model(domain, field)

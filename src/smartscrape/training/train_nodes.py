@@ -20,7 +20,7 @@ from ..adapters.fitlayout import (
 from ..ml.features import (
     fl_node_features,
     soup_nodes_and_feats,
-    fl_nodes_and_feats_from_file,
+    fl_nodes_and_feats_from_url,
 )
 
 load_dotenv(find_dotenv(usecwd=True))

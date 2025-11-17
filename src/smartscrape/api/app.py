@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from ..core.parsers import (
-    parse_product_newV6,
+    parse_product_new,
     parse_job_new,
     parse_event_new,
     load_labels,
@@ -45,7 +45,7 @@ SCHEMAS = {
 }
 
 PARSERS = {
-    "product": parse_product_newV6,
+    "product": parse_product_new,
     "job": parse_job_new,
     "event": parse_event_new,
 }

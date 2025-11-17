@@ -1,5 +1,5 @@
 import json
-from smartscrape.core.parsers import parse_product_newV6, parse_job_new, parse_event_new
+from smartscrape.core.parsers import parse_product_new, parse_job_new, parse_event_new
 from smartscrape.core.validation import validate_manual, validate_jsonschema
 
 
@@ -18,7 +18,7 @@ def test_product_parser_minimal_jsonld(tmp_path):
       </script>
     </head><body></body></html>
     """
-    rec, proof = parse_product_newV6(html=html)
+    rec, proof = parse_product_new(html=html)
     assert rec["title"] == "Test Phone"
     assert rec["sku"] == "TP-001"
     assert rec["price"] == 199.90
