@@ -29,6 +29,6 @@ jobs:
           import importlib
           for m in ["fastapi","uvicorn","requests","bs4","numpy","jsonschema","joblib","sklearn"]:
               importlib.import_module(m)
-          import smartscrape.api.app   # проверка импорта пакета
+          import smartscrape.api.app   # check package import
           print("deps ok & package imports")
           PY

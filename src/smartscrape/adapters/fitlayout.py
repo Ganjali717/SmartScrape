@@ -1,128 +1,271 @@
-# src/smartscrape/adapters/fitlayout.py
 from __future__ import annotations
 
-import json
-import os
-import re
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-
+import os, json, re, time
+from dotenv import find_dotenv, load_dotenv
 import requests
-from bs4 import BeautifulSoup
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict, Any
 
-# --------- Basic HTTP client for FitLayout ---------
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+
+load_dotenv(find_dotenv(usecwd=True))
 
 
-def _auth_headers(token: str) -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {token}",
-        # Будь максимально совместим: некоторые эндпоинты чувствительны к Accept
-        "Accept": "*/*",
-        "User-Agent": "SmartScrape/1.0",
-    }
+def _fix_base(url: Optional[str]) -> str:
+    if not url:
+        return "https://layout.fit.vutbr.cz/api"
+    u = url.rstrip("/")
+    # если случайно дали URL UI:
+    if u.endswith("/fitlayout-web"):
+        u = u[: -len("/fitlayout-web")] + "/api"
+    if not u.endswith("/api"):
+        if not u.endswith("/api/"):
+            u = u + "/api"
+    return u
+
+
+@dataclass
+class FLNode:
+    id: str
+    text: str
+    bbox: Tuple[float, float, float, float]  # x,y,w,h
+    font_size: Optional[float]
+    font_weight: Optional[float]
+    dom_path: Optional[str]
+    parent: Optional[str]
 
 
 class FitLayoutClient:
-    """
-    Minimal client for FitLayout REST API.
-    base_url: e.g. https://layout.fit.vutbr.cz/api   (важно: именно /api)
-    repo:     repository id (UUID)
-    token:    bearer token
-    """
-
-    def __init__(self, base_url: str, repo: str, token: str, timeout: int = 90):
-        self.base_url = base_url.rstrip("/")
+    def __init__(
+        self, base_url: Optional[str], repo: str, token: str, timeout: int = 90
+    ):
+        self.base = _fix_base(base_url)
         self.repo = repo
         self.token = token
         self.timeout = timeout
 
-    # --- low-level ---
-    def _get(self, path: str, **kw) -> requests.Response:
-        url = f"{self.base_url}{path}"
+    @property
+    def _h(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": UA,
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+        }
+
+    @property
+    def _h_sparql(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": UA,
+            "Accept": "application/sparql-results+json",
+            "Content-Type": "application/sparql-query",
+        }
+
+    def list_services(self) -> list[dict]:
         r = requests.get(
-            url, headers=_auth_headers(self.token), timeout=self.timeout, **kw
+            f"{self.base}/r/{self.repo}/service", headers=self._h, timeout=self.timeout
         )
         r.raise_for_status()
-        return r
-
-    def _post(self, path: str, **kw) -> requests.Response:
-        url = f"{self.base_url}{path}"
-        headers = _auth_headers(self.token)
-        data_headers = kw.pop("headers", {})
-        headers.update(data_headers)
-        r = requests.post(url, headers=headers, timeout=self.timeout, **kw)
-        r.raise_for_status()
-        return r
-
-    # --- services ---
-    def list_services(self) -> List[Dict[str, Any]]:
-        r = self._get(f"/r/{self.repo}/service")
         return r.json()
 
-    def get_service(self, predicate) -> Dict[str, Any]:
+    def get_service(self, pred) -> dict:
         for s in self.list_services():
-            if predicate(s):
+            if pred(s):
                 return s
-        raise ValueError("Required service not found")
+        raise RuntimeError("FitLayout service not found by predicate")
 
-    def invoke_service(self, service_id: str, params: Dict[str, Any]) -> None:
+    def service_config(self, service_id: str) -> dict:
+        r = requests.get(
+            f"{self.base}/r/{self.repo}/service/config?id={service_id}",
+            headers=self._h,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def postService(self, service_id: str, params: dict) -> dict:
         body = {"serviceId": service_id, "params": params}
-        # Тут ответ нам не важен (артефакт попадает в репозиторий)
-        self._post(
-            f"/r/{self.repo}/service",
+        print(body)
+        r = requests.post(
+            f"{self.base}/r/{self.repo}/service",
+            headers=self._h,
             json=body,
-            headers={"Content-Type": "application/json"},
+            timeout=self.timeout,
         )
+        r.raise_for_status()
+        return r.json()
 
-    # --- SPARQL ---
-    def select(self, sparql: str) -> Dict[str, Any]:
-        # Возвращаем стандартный JSON: head/vars + results/bindings
-        r = self._post(
-            f"/r/{self.repo}/sparql/select",
-            data={"query": sparql},
-            headers={"Accept": "application/sparql-results+json"},
+    def repositoryQuery(self, sparql: str) -> dict:
+        # API: POST /api/r/{repo}/sparql   { query: "..."}
+        r = requests.post(
+            f"{self.base}/r/{self.repo}/repository/query",
+            headers=self._h_sparql,
+            data=sparql,
+            timeout=self.timeout,
         )
+        r.raise_for_status()
         return r.json()
 
 
-# --------- HTML + JSON-LD helpers (используются в parsers.py) ---------
+def _first_present(names: list[str], present: set[str], value: Any) -> dict:
+    for n in names:
+        if n in present:
+            return {n: value}
+    return {}
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+
+def render_url_to_nodes(
+    url: str, viewport: Tuple[int, int] = (1200, 800), persist: int = 1
+) -> List[FLNode]:
+    base_url = os.getenv("FITLAYOUT_URL")
+    repo = os.getenv("FITLAYOUT_REPO")
+    token = os.getenv("FITLAYOUT_TOKEN")
+
+    if not repo or not token:
+        raise ValueError("Set FITLAYOUT_REPO and FITLAYOUT_TOKEN in environment/.env")
+
+    fl = FitLayoutClient(base_url, repo, token, timeout=90)
+
+    # ищем Puppeteer
+    pupp = fl.get_service(
+        lambda s: "puppeteer" in s.get("id", "").lower()
+        or "puppeteer" in s.get("name", "").lower()
+    )
+
+    cfg = fl.service_config(pupp["id"])
+    raw = cfg.get("params", {})
+    if isinstance(raw, dict):
+        pnames = set(raw.keys())
+    elif isinstance(raw, list):
+        pnames = set((p.get("name") if isinstance(p, dict) else str(p)) for p in raw)
+    else:
+        pnames = set()
+
+    params = {}
+    # params |= _first_present(["url", "pageUrl", "sourceUrl"], pnames, url)
+    params["url"] = url
+    if "width" in pnames:
+        params["width"] = viewport[0]
+    if "height" in pnames:
+        params["height"] = viewport[1]
+    if "persist" in pnames:
+        params["persist"] = persist
+    if "acquireImages" in pnames:
+        params["acquireImages"] = False
+    if "includeScreenshot" in pnames:
+        params["includeScreenshot"] = False
+
+    # рендер
+    try:
+        fl.postService(pupp["id"], params)
+    except requests.HTTPError as e:
+        raise ValueError(
+            f"FitLayout render failed: {e.response.status_code if e.response else ''} {getattr(e.response,'text', '')[:300]}"
+        )
+
+    # достаём визуальные боксы
+    sparql = """
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX b: <http://fitlayout.github.io/ontology/render.owl#>
+SELECT ?id ?x ?y ?w ?h ?text ?fsize ?fweight ?parent ?xpath WHERE {
+  ?b a b:Box ; b:visualBounds ?vb .
+  ?vb b:positionX ?x ; b:positionY ?y ; b:width ?w ; b:height ?h .
+  OPTIONAL { ?b b:text ?text }
+  OPTIONAL { ?b b:fontSize ?fsize }
+  OPTIONAL { ?b b:fontWeight ?fweight }
+  OPTIONAL { ?b b:isChildOf ?parent }
+  OPTIONAL { ?b b:sourceXPath ?xpath }
+  BIND(STR(?b) AS ?id)
+}
+"""
+    tbl = fl.repositoryQuery(sparql)
+
+    def _normalize_table(t: dict) -> tuple[list[str], list[list[Any]]]:
+        # Вариант А: {"columns":[{"name":"x"},...], "data":[[...], ...]}
+        if "columns" in t and "data" in t:
+            cols = [c["name"] for c in t["columns"]]
+            return cols, t["data"]
+        # Вариант B: SPARQL JSON {"head":{"vars":[...]}, "results":{"bindings":[...]}}
+        if "head" in t and "results" in t:
+            cols = t["head"].get("vars", [])
+            rows = []
+            for b in t["results"].get("bindings", []):
+                row = []
+                for c in cols:
+                    v = b.get(c, {}).get("value")
+                    row.append(v)
+                rows.append(row)
+            return cols, rows
+        raise KeyError("Unexpected SPARQL response shape")
+
+    cols, data = _normalize_table(tbl)
+    idx = {n: i for i, n in enumerate(cols)}
+    nodes: List[FLNode] = []
+
+    def g(row, k):
+        return row[idx[k]] if k in idx else None
+
+    for row in data:
+        nodes.append(
+            FLNode(
+                id=str(g(row, "id")),
+                dom_path=g(row, "xpath") or None,
+                text=(g(row, "text") or "").strip(),
+                bbox=(
+                    float(g(row, "x") or 0),
+                    float(g(row, "y") or 0),
+                    float(g(row, "w") or 0),
+                    float(g(row, "h") or 0),
+                ),
+                font_size=(
+                    float(g(row, "fsize")) if g(row, "fsize") is not None else None
+                ),
+                font_weight=(
+                    float(g(row, "fweight")) if g(row, "fweight") is not None else None
+                ),
+                parent=str(g(row, "parent")) if g(row, "parent") else None,
+            )
+        )
+    return nodes
+
+
+# ---------- Helpers: HTML + JSON-LD ----------
 
 
 def fetch_html(url: str, timeout: int = 30) -> str:
-    r = requests.get(
-        url,
-        timeout=timeout,
-        headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"},
-    )
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": UA})
     r.raise_for_status()
     return r.text
 
 
-def jsonld_product_from_url(url: str) -> dict:
-    fullHtml = fetch_html(url)
+def _walk(o):
+    if isinstance(o, dict):
+        yield o
+        for v in o.values():
+            yield from _walk(v)
+    elif isinstance(o, list):
+        for it in o:
+            yield from _walk(it)
 
-    soup = BeautifulSoup(fullHtml or "", "html.parser")
-    for tag in soup.find_all("script", type="application/ld+json"):
-        txt = (tag.string or tag.get_text() or "").strip()
+
+def jsonld_product_from_html(html: str) -> dict:
+    # простейший парсер JSON-LD без BeautifulSoup (чтобы не тащить зависимость)
+    # возьмём все <script type="application/ld+json"> примитивно регуляркой:
+    scripts = re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html,
+        flags=re.I | re.S,
+    )
+    for block in scripts:
+        txt = block.strip()
         if not txt:
             continue
         try:
             data = json.loads(txt)
         except Exception:
             continue
-
-        def walk(o):
-            if isinstance(o, dict):
-                yield o
-                for v in o.values():
-                    yield from walk(v)
-            elif isinstance(o, list):
-                for it in o:
-                    yield from walk(it)
-
-        for it in walk(data):
+        for it in _walk(data):
             t = it.get("@type")
             is_product = (isinstance(t, str) and t.lower() == "product") or (
                 isinstance(t, list) and any(str(x).lower() == "product" for x in t)
@@ -134,135 +277,17 @@ def jsonld_product_from_url(url: str) -> dict:
                 offers = offers[0] if offers else {}
             return {
                 "title": it.get("name") or it.get("title"),
-                "price": offers.get("price"),
-                "priceCurrency": offers.get("priceCurrency"),
+                "price": offers.get("price") or it.get("price"),
+                "priceCurrency": offers.get("priceCurrency") or it.get("priceCurrency"),
                 "sku": it.get("sku") or offers.get("sku"),
                 "availability": offers.get("availability") or it.get("availability"),
             }
     return {}
 
 
-# --------- Rendering → nodes via Puppeteer ---------
-
-
-@dataclass
-class FLNode:
-    id: str
-    dom_path: Optional[str]
-    text: str
-    bbox: Tuple[float, float, float, float]
-    font_size: Optional[float]
-    font_weight: Optional[float]
-    parent: Optional[str]
-
-
-def _sparql_rows(tbl_json: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Normalize SPARQL JSON (head/vars + results/bindings) to list of dicts."""
-    if "head" in tbl_json and "vars" in tbl_json["head"]:
-        vars_ = tbl_json["head"]["vars"]
-        rows = []
-        for b in tbl_json.get("results", {}).get("bindings", []):
-            row = {}
-            for v in vars_:
-                cell = b.get(v)
-                row[v] = cell.get("value") if isinstance(cell, dict) else None
-            rows.append(row)
-        return rows
-    # fallback (если когда-то вернётся табличный формат)
-    if "columns" in tbl_json and "data" in tbl_json:
-        vars_ = [c["name"] for c in tbl_json["columns"]]
-        return [dict(zip(vars_, r)) for r in tbl_json["data"]]
-    raise ValueError("Unexpected SPARQL result format")
-
-
-def render_url_to_nodes(
-    url: str,
-    base_url: Optional[str] = None,
-    repo: Optional[str] = None,
-    token: Optional[str] = None,
-    viewport: Tuple[int, int] = (1200, 800),
-    persist: int = 1,
-) -> List[FLNode]:
-    base_url = (base_url or os.getenv("FITLAYOUT_URL") or "").rstrip("/")
-    repo = repo or os.getenv("FITLAYOUT_REPO")
-    token = token or os.getenv("FITLAYOUT_TOKEN")
-    if not (base_url and repo and token):
-        raise ValueError(
-            "FITLAYOUT_URL/FITLAYOUT_REPO/FITLAYOUT_TOKEN must be set (check your .env)"
-        )
-
-    # ВАЖНО: base_url должен указывать на /api, пример: https://layout.fit.vutbr.cz/api
-    if not base_url.endswith("/api"):
-        # позволим ставить просто https://layout.fit.vutbr.cz — тогда добавим /api
-        if base_url.endswith("/fitlayout-web"):
-            base_url = base_url.rsplit("/fitlayout-web", 1)[0] + "/api"
-        elif not base_url.endswith("/api"):
-            base_url = base_url + "/api"
-
-    fl = FitLayoutClient(base_url, repo, token, timeout=90)
-
-    # 1) найдём Puppeteer renderer
-    renderer = fl.get_service(
-        lambda s: str(s.get("id", "")).lower() == "fitlayout.puppeteer"
-    )
-
-    # 2) вызов рендера
-    params = {
-        "url": url,
-        "width": int(viewport[0]),
-        "height": int(viewport[1]),
-        "persist": int(persist),
-        "acquireImages": False,
-        "includeScreenshot": False,
-    }
+def jsonld_product_from_url(url: str, timeout: int = 30) -> dict:
     try:
-        fl.invoke_service(renderer["id"], params)
-    except requests.HTTPError as e:
-        # если сайт отрубил браузер — попробуем offline режим через HTML (это опционально, но полезно)
-        raise ValueError(
-            f"FitLayout render failed: {getattr(e.response,'status_code', '')} {getattr(e.response,'text','')[:300]}"
-        )
-
-    # 3) вытащим боксы через SPARQL
-    sparql = """
-    PREFIX b: <http://fitlayout.github.io/ontology/render.owl#>
-    SELECT ?id ?x ?y ?w ?h ?text ?fsize ?fweight ?parent ?xpath WHERE {
-      ?b a b:Box ; b:visualBounds ?vb .
-      ?vb b:positionX ?x ; b:positionY ?y ; b:width ?w ; b:height ?h .
-      OPTIONAL { ?b b:text ?text } 
-      OPTIONAL { ?b b:fontSize ?fsize }
-      OPTIONAL { ?b b:fontWeight ?fweight } 
-      OPTIONAL { ?b b:isChildOf ?parent }
-      OPTIONAL { ?b b:sourceXPath ?xpath }
-      BIND(STR(?b) AS ?id)
-    }
-    """
-    tbl = fl.select(sparql)
-    rows = _sparql_rows(tbl)
-
-    nodes: List[FLNode] = []
-    for r in rows:
-
-        def f(x):
-            try:
-                return float(x) if x is not None else None
-            except Exception:
-                return None
-
-        nodes.append(
-            FLNode(
-                id=str(r.get("id") or ""),
-                dom_path=r.get("xpath"),
-                text=(r.get("text") or "").strip(),
-                bbox=(
-                    f(r.get("x")) or 0.0,
-                    f(r.get("y")) or 0.0,
-                    f(r.get("w")) or 0.0,
-                    f(r.get("h")) or 0.0,
-                ),
-                font_size=f(r.get("fsize")),
-                font_weight=f(r.get("fweight")),
-                parent=r.get("parent"),
-            )
-        )
-    return nodes
+        html = fetch_html(url, timeout=timeout)
+    except Exception:
+        return {}
+    return jsonld_product_from_html(html)
